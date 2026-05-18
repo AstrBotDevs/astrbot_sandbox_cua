@@ -112,13 +112,36 @@ class CuaSandboxProvider:
             "local": config.get("local", True),
             "image": config.get("image"),
             "os_type": config.get("os_type"),
-            "persistent_name": self._persistent_name(config, sandbox_name),
+            "persistent_name": self._persistent_name(
+                config,
+                str(config.get("sandbox_id") or sandbox_name),
+            ),
         }
 
     def update_connect_info(self, record: dict, *, sandbox_name: str) -> dict:
         connect_info = dict(record.get("connect_info") or {})
         connect_info["name"] = sandbox_name
+        connect_info.setdefault(
+            "persistent_name",
+            str(record.get("sandbox_id") or sandbox_name).strip(),
+        )
         return connect_info
+
+    def _resolve_create_persistent_name(self, config: dict, sandbox_id: str) -> str:
+        persistent_name = self._persistent_name(config, sandbox_id)
+        if not config.get("resume") or not config.get("local", True):
+            return persistent_name
+        if persistent_name == sandbox_id:
+            return persistent_name
+        try:
+            from cua_sandbox import sandbox_state
+        except ImportError:
+            return persistent_name
+        persistent_state = sandbox_state.load(persistent_name)
+        sandbox_id_state = sandbox_state.load(sandbox_id)
+        if persistent_state is None and sandbox_id_state is not None:
+            return sandbox_id
+        return persistent_name
 
     def get_idle_timeout(self, context: Context, session_id: str) -> float:
         sandbox_cfg = self._merged_sandbox_config(context, session_id)
@@ -151,11 +174,32 @@ class CuaSandboxProvider:
         api_key = connect_info.get("api_key") or self.plugin_config.get("api_key")
         if api_key:
             connect_kwargs["api_key"] = api_key
+        if connect_kwargs["local"]:
+            try:
+                from cua_sandbox import sandbox_state
+            except ImportError:
+                pass
+            else:
+                if sandbox_state.load(sandbox_name) is not None:
+                    return True
         try:
             sandbox = await connect(sandbox_name, **connect_kwargs)
         except Exception as exc:
             if cua_booter._is_missing_persistent_sandbox_error(exc):
-                return False
+                resume = getattr(Sandbox, "resume", None)
+                if not callable(resume):
+                    return False
+                try:
+                    sandbox = await resume(sandbox_name, **connect_kwargs)
+                except Exception as resume_exc:
+                    if cua_booter._is_missing_persistent_sandbox_error(resume_exc):
+                        return False
+                    raise
+                else:
+                    disconnect = getattr(sandbox, "disconnect", None)
+                    if callable(disconnect):
+                        await disconnect()
+                    return True
             raise
 
         disconnect = getattr(sandbox, "disconnect", None)
@@ -174,7 +218,7 @@ class CuaSandboxProvider:
             return await self._boot_hook(context, session_id, sandbox_id, config)
         uuid_str = uuid.uuid5(uuid.NAMESPACE_DNS, session_id).hex
         persistent = True
-        persistent_name = self._persistent_name(config, sandbox_id)
+        persistent_name = self._resolve_create_persistent_name(config, sandbox_id)
         booter_config = {
             **config,
             "persistent": persistent,
