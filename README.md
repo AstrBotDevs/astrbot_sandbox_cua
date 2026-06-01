@@ -15,6 +15,7 @@ English ｜ <a href="./README_cn.md">简体中文</a>
 3. 🖱️ Adds GUI tools for screenshots, mouse clicks, and keyboard input.
 4. ☁️ Supports local-first execution and cloud-backed CUA runtimes.
 5. ♻️ Can recycle idle sandboxes through `cua_idle_timeout`.
+6. 🔁 Supports AstrBot persistent managed sandboxes by reconnecting to named CUA sandboxes.
 
 ## Quick Start
 
@@ -55,6 +56,7 @@ Configuration path:
 - After the plugin is enabled, AstrBot mounts CUA tools automatically when the active sandbox driver is `cua`.
 - If you want cloud execution, set `cua_local` to `false` and provide `cua_api_key`.
 - If you want AstrBot to recycle idle managed sandboxes, set `cua_idle_timeout` to a positive value.
+- Persistent sandboxes keep their CUA runtime after AstrBot disconnects and are restored by name on restart. Temporary sandboxes are deleted when AstrBot cleans them up.
 
 ## Requirements and Limitations
 

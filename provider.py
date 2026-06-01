@@ -57,8 +57,8 @@ def _resolve_cua_idle_timeout(config: Mapping[str, Any]) -> float:
 
 class CuaSandboxProvider:
     provider_id = "cua"
-    capabilities = {"shell", "python", "filesystem", "screenshot", "mouse", "keyboard"}
     supports_persistent_reconnect = True
+    capabilities = {"shell", "python", "filesystem", "screenshot", "mouse", "keyboard"}
     tool_names = {
         "astrbot_cua_screenshot",
         "astrbot_cua_mouse_click",
@@ -216,6 +216,8 @@ class CuaSandboxProvider:
     ) -> ComputerBooter:
         if self._boot_hook is not None:
             return await self._boot_hook(context, session_id, sandbox_id, config)
+        config = dict(config)
+        config.setdefault("persistent_name", sandbox_id)
         uuid_str = uuid.uuid5(uuid.NAMESPACE_DNS, session_id).hex
         persistent = True
         persistent_name = self._resolve_create_persistent_name(config, sandbox_id)

@@ -4,9 +4,104 @@ from types import SimpleNamespace
 
 import pytest
 
-from data.plugins.astrbot_sandbox_cua import provider as provider_module
-from data.plugins.astrbot_sandbox_cua import main as plugin_main
-from data.plugins.astrbot_sandbox_cua.booters.cua import (
+
+import sys
+import types
+
+
+
+class _DummyLogger:
+    def warning(self, *args, **kwargs):
+        pass
+
+    def info(self, *args, **kwargs):
+        pass
+
+
+astrbot = types.ModuleType("astrbot")
+astrbot_api = types.ModuleType("astrbot.api")
+astrbot_api.logger = _DummyLogger()
+astrbot_api.FunctionTool = type("FunctionTool", (), {})
+astrbot_api_event = types.ModuleType("astrbot.api.event")
+astrbot_api_event.filter = SimpleNamespace(command=lambda *a, **k: (lambda f: f))
+astrbot_api_star = types.ModuleType("astrbot.api.star")
+astrbot_api_star.Context = type("Context", (), {})
+astrbot_api_star.Star = type("Star", (), {"__init__": lambda self, context: None})
+astrbot_api_star.register = lambda *a, **k: (lambda cls: cls)
+astrbot_core = types.ModuleType("astrbot.core")
+astrbot_agent = types.ModuleType("astrbot.core.agent")
+astrbot_agent_run_context = types.ModuleType("astrbot.core.agent.run_context")
+astrbot_agent_run_context.ContextWrapper = type("ContextWrapper", (), {"__class_getitem__": classmethod(lambda cls, item: cls)})
+astrbot_agent_tool = types.ModuleType("astrbot.core.agent.tool")
+astrbot_agent_tool.ToolExecResult = type("ToolExecResult", (), {})
+astrbot_astr_agent_context = types.ModuleType("astrbot.core.astr_agent_context")
+astrbot_astr_agent_context.AstrAgentContext = type("AstrAgentContext", (), {})
+astrbot_computer = types.ModuleType("astrbot.core.computer")
+astrbot_computer_client = types.ModuleType("astrbot.core.computer.computer_client")
+astrbot_computer_client.cleanup_sandbox_provider = None
+astrbot_computer_client.detach_sandbox_provider = None
+astrbot_computer_client.register_sandbox_provider = lambda *a, **k: None
+astrbot_computer_client.get_booter = None
+astrbot_olayer = types.ModuleType("astrbot.core.computer.olayer")
+for component in ("BrowserComponent", "FileSystemComponent", "GUIComponent", "PythonComponent", "ShellComponent"):
+    setattr(astrbot_olayer, component, type(component, (), {}))
+astrbot_booters = types.ModuleType("astrbot.core.computer.booters")
+astrbot_booters_base = types.ModuleType("astrbot.core.computer.booters.base")
+astrbot_booters_base.ComputerBooter = type("ComputerBooter", (), {})
+astrbot_sandbox_timeouts = types.ModuleType("astrbot.core.computer.sandbox_timeouts")
+astrbot_sandbox_timeouts.resolve_sandbox_timeout = lambda config, key, aliases=(), default=0: config.get(key, config.get(aliases[0], default) if aliases else default)
+astrbot_message_result = types.ModuleType("astrbot.core.message.message_event_result")
+astrbot_message_result.MessageChain = type("MessageChain", (), {})
+astrbot_tools_util = types.ModuleType("astrbot.core.tools.computer_tools.util")
+astrbot_tools_util.check_admin_permission = lambda *a, **k: True
+astrbot_path = types.ModuleType("astrbot.core.utils.astrbot_path")
+astrbot_path.get_astrbot_temp_path = lambda: "/tmp"
+astrbot_star = types.ModuleType("astrbot.core.star")
+astrbot_star_context = types.ModuleType("astrbot.core.star.context")
+astrbot_star_context.Context = type("Context", (), {})
+mcp = types.ModuleType("mcp")
+
+PACKAGE = types.ModuleType("astrbot_sandbox_cua")
+PACKAGE.__path__ = [str(Path(__file__).resolve().parent)]
+BOOTERS_PACKAGE = types.ModuleType("astrbot_sandbox_cua.booters")
+BOOTERS_PACKAGE.__path__ = [str(Path(__file__).resolve().parent / "booters")]
+TOOLS_PACKAGE = types.ModuleType("astrbot_sandbox_cua.tools")
+TOOLS_PACKAGE.__path__ = [str(Path(__file__).resolve().parent / "tools")]
+TOOLS_PACKAGE.CuaKeyboardTypeTool = type("CuaKeyboardTypeTool", (), {})
+TOOLS_PACKAGE.CuaMouseClickTool = type("CuaMouseClickTool", (), {})
+TOOLS_PACKAGE.CuaScreenshotTool = type("CuaScreenshotTool", (), {})
+
+for name, module in {
+    "astrbot": astrbot,
+    "astrbot.api": astrbot_api,
+    "astrbot.api.event": astrbot_api_event,
+    "astrbot.api.star": astrbot_api_star,
+    "astrbot.core": astrbot_core,
+    "astrbot.core.agent": astrbot_agent,
+    "astrbot.core.agent.run_context": astrbot_agent_run_context,
+    "astrbot.core.agent.tool": astrbot_agent_tool,
+    "astrbot.core.astr_agent_context": astrbot_astr_agent_context,
+    "astrbot.core.computer": astrbot_computer,
+    "astrbot.core.computer.computer_client": astrbot_computer_client,
+    "astrbot.core.computer.olayer": astrbot_olayer,
+    "astrbot.core.computer.booters": astrbot_booters,
+    "astrbot.core.computer.booters.base": astrbot_booters_base,
+    "astrbot.core.computer.sandbox_timeouts": astrbot_sandbox_timeouts,
+    "astrbot.core.message.message_event_result": astrbot_message_result,
+    "astrbot.core.tools.computer_tools.util": astrbot_tools_util,
+    "astrbot.core.utils.astrbot_path": astrbot_path,
+    "astrbot.core.star": astrbot_star,
+    "astrbot.core.star.context": astrbot_star_context,
+    "astrbot_sandbox_cua": PACKAGE,
+    "astrbot_sandbox_cua.booters": BOOTERS_PACKAGE,
+    "astrbot_sandbox_cua.tools": TOOLS_PACKAGE,
+    "mcp": mcp,
+}.items():
+    sys.modules.setdefault(name, module)
+
+from astrbot_sandbox_cua import provider as provider_module  # noqa: E402
+from astrbot_sandbox_cua import main as plugin_main  # noqa: E402
+from astrbot_sandbox_cua.booters.cua import (  # noqa: E402
     CuaBooter,
     _write_base64_via_shell,
 )

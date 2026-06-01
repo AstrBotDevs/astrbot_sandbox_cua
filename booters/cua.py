@@ -769,6 +769,7 @@ def _screenshot_to_bytes(raw: Any) -> bytes:
 class _CuaRuntime:
     sandbox_cm: Any | None
     sandbox: Any
+    persistent: bool
     shell: CuaShellComponent
     python: CuaPythonComponent
     fs: CuaFileSystemComponent
@@ -826,6 +827,7 @@ class CuaBooter(ComputerBooter):
             self._runtime = _CuaRuntime(
                 sandbox_cm=sandbox_cm,
                 sandbox=sandbox,
+                persistent=self.persistent,
                 shell=CuaShellComponent(sandbox, os_type=self.os_type),
                 python=CuaPythonComponent(sandbox, os_type=self.os_type),
                 fs=CuaFileSystemComponent(sandbox, os_type=self.os_type),
@@ -841,9 +843,11 @@ class CuaBooter(ComputerBooter):
             self._runtime = None
             raise
         logger.info(
-            "[Computer] CUA sandbox booted: image=%s, os_type=%s",
+            "[Computer] CUA sandbox booted: image=%s, os_type=%s, persistent=%s, resume=%s",
             self.image,
             self.os_type,
+            self.persistent,
+            self.resume,
         )
 
     def _build_image(self, image_cls: Any) -> Any:
@@ -946,6 +950,10 @@ class CuaBooter(ComputerBooter):
             if _is_missing_persistent_sandbox_error(exc):
                 return
             raise
+
+    @property
+    def sandbox(self) -> Any | None:
+        return None if self._runtime is None else self._runtime.sandbox
 
     @property
     def capabilities(self) -> tuple[str, ...] | None:

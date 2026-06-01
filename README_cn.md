@@ -15,6 +15,7 @@
 3. 🖱️ 提供截图、鼠标点击、键盘输入等 GUI 工具。
 4. ☁️ 支持本地优先，也可以切换到云端 CUA。
 5. ♻️ 可通过 `cua_idle_timeout` 自动回收空闲沙盒。
+6. 🔁 支持 AstrBot 持久托管沙箱，可按名称重连 CUA 沙箱。
 
 ## 快速开始
 
@@ -54,7 +55,8 @@ git clone https://github.com/zouyonghe/astrbot_sandbox_cua.git data/plugins/astr
 - 当你需要真实 GUI 操作，而不是单纯的浏览器自动化时，优先使用这个插件。
 - 插件启用后，只要当前沙盒驱动是 `cua`，AstrBot 就会自动挂载对应的 CUA 工具。
 - 如果需要云端运行，请把 `cua_local` 设为 `false`，并提供 `cua_api_key`。
-- 如果希望 AstrBot 自动回收空闲沙盒，请把 `cua_idle_timeout` 设置为大于 `0` 的值。
+- 如果希望 AstrBot 自动回收空闲托管沙箱，请把 `cua_idle_timeout` 设置为大于 `0` 的值。
+- 持久沙箱会在 AstrBot 断开后保留 CUA 运行时，并在重启后按名称恢复。临时沙箱在 AstrBot 清理时会被删除。
 
 ## 依赖与限制
 
