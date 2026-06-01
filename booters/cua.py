@@ -746,6 +746,11 @@ class CuaBooter(ComputerBooter):
 
     async def boot(self, session_id: str) -> None:
         _ = session_id
+        logger.info(
+            "[Computer] Booting CUA sandbox: image=%s, os_type=%s",
+            self.image,
+            self.os_type,
+        )
         try:
             from cua import Image, Sandbox
         except ImportError as exc:
