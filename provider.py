@@ -17,6 +17,7 @@ BootHook = Callable[[Context, str, str, dict], Awaitable[ComputerBooter]]
 
 class CuaSandboxProvider:
     provider_id = "cua"
+    supports_persistent_reconnect = True
     capabilities = {"shell", "python", "filesystem", "screenshot", "mouse", "keyboard"}
     tool_names = {
         "astrbot_cua_screenshot",
@@ -57,8 +58,10 @@ class CuaSandboxProvider:
         return booter_kwargs
 
     def build_connect_info(self, sandbox_name: str, config: dict) -> dict:
+        persistent_name = str(config.get("sandbox_id") or sandbox_name).strip()
         return {
             "name": sandbox_name,
+            "persistent_name": persistent_name,
             "local": config.get("local", True),
             "image": config.get("image"),
             "os_type": config.get("os_type"),
@@ -67,6 +70,23 @@ class CuaSandboxProvider:
     def update_connect_info(self, record: dict, *, sandbox_name: str) -> dict:
         connect_info = dict(record.get("connect_info") or {})
         connect_info["name"] = sandbox_name
+        connect_info.setdefault(
+            "persistent_name", str(record.get("sandbox_id") or sandbox_name).strip()
+        )
+        return connect_info
+
+    def update_connect_info_after_boot(
+        self, record: dict, booter: ComputerBooter
+    ) -> dict | None:
+        connect_info = dict(record.get("connect_info") or {})
+        persistent_name = getattr(booter, "persistent_name", None)
+        if persistent_name:
+            connect_info["persistent_name"] = persistent_name
+        sandbox = getattr(booter, "sandbox", None)
+        if sandbox is not None:
+            name = getattr(sandbox, "name", None)
+            if name:
+                connect_info["runtime_name"] = name
         return connect_info
 
     def get_idle_timeout(self, context: Context, session_id: str) -> float:
@@ -87,11 +107,13 @@ class CuaSandboxProvider:
     ) -> ComputerBooter:
         if self._boot_hook is not None:
             return await self._boot_hook(context, session_id, sandbox_id, config)
+        config = dict(config)
+        config.setdefault("persistent_name", sandbox_id)
         uuid_str = uuid.uuid5(uuid.NAMESPACE_DNS, session_id).hex
         client = cua_booter.CuaBooter(**config)
         started_at = time.monotonic()
         logger.info(
-            "[Computer] CUA managed sandbox boot start: sandbox_id=%s session_id=%s boot_session_id=%s image=%s os_type=%s local=%s ttl=%s",
+            "[Computer] CUA managed sandbox boot start: sandbox_id=%s session_id=%s boot_session_id=%s image=%s os_type=%s local=%s ttl=%s persistent=%s resume=%s",
             sandbox_id,
             session_id,
             uuid_str,
@@ -99,6 +121,8 @@ class CuaSandboxProvider:
             config.get("os_type"),
             config.get("local"),
             config.get("ttl"),
+            config.get("persistent_name"),
+            config.get("resume"),
         )
         try:
             await client.boot(uuid_str)
@@ -129,4 +153,8 @@ class CuaSandboxProvider:
         return client
 
     async def destroy_booter(self, booter: ComputerBooter, record: dict) -> None:
+        destroy = getattr(booter, "destroy", None)
+        if callable(destroy):
+            await destroy()
+            return
         await booter.shutdown()

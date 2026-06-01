@@ -13,6 +13,7 @@ It adds the `cua` sandbox provider and registers GUI-oriented tools for screensh
 - Adds GUI-oriented tools for screenshot, mouse click, and keyboard typing.
 - Supports both local-preferred and cloud-backed CUA environments.
 - Supports managed sandbox idle cleanup through `cua_idle_timeout`.
+- Supports AstrBot persistent managed sandboxes by reconnecting to named CUA sandboxes.
 
 ## Requirements
 
@@ -64,6 +65,7 @@ Provider-specific options:
 - After the plugin is enabled, AstrBot can mount CUA tools automatically when the active sandbox provider is `cua`.
 - If you want cloud execution, set `cua_local` to `false` and provide `cua_api_key`.
 - If you want AstrBot to recycle idle managed sandboxes, set `cua_idle_timeout` to a positive value.
+- Persistent sandboxes keep their CUA runtime after AstrBot disconnects and are restored by name on restart. Temporary sandboxes are deleted when AstrBot cleans them up.
 
 ## Limitations
 

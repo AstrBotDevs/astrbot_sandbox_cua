@@ -720,6 +720,7 @@ def _screenshot_to_bytes(raw: Any) -> bytes:
 class _CuaRuntime:
     sandbox_cm: Any
     sandbox: Any
+    persistent: bool
     shell: CuaShellComponent
     python: CuaPythonComponent
     fs: CuaFileSystemComponent
@@ -735,6 +736,8 @@ class CuaBooter(ComputerBooter):
         telemetry_enabled: bool = CUA_DEFAULT_CONFIG["telemetry_enabled"],
         local: bool = CUA_DEFAULT_CONFIG["local"],
         api_key: str = CUA_DEFAULT_CONFIG["api_key"],
+        persistent_name: str | None = None,
+        resume: bool = False,
     ) -> None:
         self.image = image
         self.os_type = os_type
@@ -742,6 +745,8 @@ class CuaBooter(ComputerBooter):
         self.telemetry_enabled = telemetry_enabled
         self.local = local
         self.api_key = api_key
+        self.persistent_name = persistent_name
+        self.resume = resume
         self._runtime: _CuaRuntime | None = None
 
     async def boot(self, session_id: str) -> None:
@@ -755,26 +760,62 @@ class CuaBooter(ComputerBooter):
             ) from exc
 
         image_obj = self._build_image(Image)
-        ephemeral_kwargs = self._build_ephemeral_kwargs(Sandbox.ephemeral)
-        sandbox_cm = Sandbox.ephemeral(image_obj, **ephemeral_kwargs)
-        sandbox = await sandbox_cm.__aenter__()
+        if self.persistent_name:
+            sandbox_cm = None
+            if self.resume:
+                try:
+                    sandbox = await Sandbox.connect(
+                        self.persistent_name,
+                        **self._build_connect_kwargs(Sandbox.connect),
+                    )
+                except Exception:
+                    resume = getattr(Sandbox, "resume", None)
+                    if resume is None:
+                        raise
+                    sandbox = await resume(
+                        self.persistent_name,
+                        **self._build_resume_kwargs(resume),
+                    )
+            else:
+                sandbox = await Sandbox.create(
+                    image_obj,
+                    name=self.persistent_name,
+                    **self._build_persistent_create_kwargs(Sandbox.create),
+                )
+        else:
+            ephemeral_kwargs = self._build_ephemeral_kwargs(Sandbox.ephemeral)
+            sandbox_cm = Sandbox.ephemeral(image_obj, **ephemeral_kwargs)
+            sandbox = await sandbox_cm.__aenter__()
         try:
             self._runtime = _CuaRuntime(
                 sandbox_cm=sandbox_cm,
                 sandbox=sandbox,
+                persistent=bool(self.persistent_name),
                 shell=CuaShellComponent(sandbox, os_type=self.os_type),
                 python=CuaPythonComponent(sandbox, os_type=self.os_type),
                 fs=CuaFileSystemComponent(sandbox, os_type=self.os_type),
                 gui=CuaGUIComponent(sandbox),
             )
         except Exception:
-            await sandbox_cm.__aexit__(None, None, None)
+            if sandbox_cm is not None:
+                await sandbox_cm.__aexit__(None, None, None)
+            else:
+                if self.resume:
+                    disconnect = getattr(sandbox, "disconnect", None)
+                    if disconnect is not None:
+                        await _maybe_await(disconnect())
+                else:
+                    destroy = getattr(sandbox, "destroy", None)
+                    if destroy is not None:
+                        await _maybe_await(destroy())
             self._runtime = None
             raise
         logger.info(
-            "[Computer] CUA sandbox booted: image=%s, os_type=%s",
+            "[Computer] CUA sandbox booted: image=%s, os_type=%s, persistent=%s, resume=%s",
             self.image,
             self.os_type,
+            bool(self.persistent_name),
+            self.resume,
         )
 
     def _build_image(self, image_cls: Any) -> Any:
@@ -803,10 +844,71 @@ class CuaBooter(ComputerBooter):
             kwargs["api_key"] = self.api_key
         return kwargs
 
+    def _build_persistent_create_kwargs(self, create: Any) -> dict[str, Any]:
+        try:
+            parameters = inspect.signature(create).parameters
+        except (TypeError, ValueError):
+            return {}
+        kwargs: dict[str, Any] = {}
+        if "telemetry_enabled" in parameters:
+            kwargs["telemetry_enabled"] = self.telemetry_enabled
+        if "local" in parameters:
+            kwargs["local"] = self.local
+        if "api_key" in parameters and self.api_key:
+            kwargs["api_key"] = self.api_key
+        return kwargs
+
+    def _build_connect_kwargs(self, connect: Any) -> dict[str, Any]:
+        try:
+            parameters = inspect.signature(connect).parameters
+        except (TypeError, ValueError):
+            return {}
+        kwargs: dict[str, Any] = {}
+        if "telemetry_enabled" in parameters:
+            kwargs["telemetry_enabled"] = self.telemetry_enabled
+        if "local" in parameters:
+            kwargs["local"] = self.local
+        if "api_key" in parameters and self.api_key:
+            kwargs["api_key"] = self.api_key
+        return kwargs
+
+    def _build_resume_kwargs(self, resume: Any) -> dict[str, Any]:
+        try:
+            parameters = inspect.signature(resume).parameters
+        except (TypeError, ValueError):
+            return {}
+        kwargs: dict[str, Any] = {}
+        if "local" in parameters:
+            kwargs["local"] = self.local
+        if "api_key" in parameters and self.api_key:
+            kwargs["api_key"] = self.api_key
+        return kwargs
+
     async def shutdown(self) -> None:
         if self._runtime is not None:
-            await self._runtime.sandbox_cm.__aexit__(None, None, None)
+            if self._runtime.persistent:
+                disconnect = getattr(self._runtime.sandbox, "disconnect", None)
+                if disconnect is not None:
+                    await _maybe_await(disconnect())
+            elif self._runtime.sandbox_cm is not None:
+                await self._runtime.sandbox_cm.__aexit__(None, None, None)
             self._runtime = None
+
+    async def destroy(self) -> None:
+        if self._runtime is None:
+            return
+        sandbox = self._runtime.sandbox
+        destroy = getattr(sandbox, "destroy", None)
+        if destroy is not None:
+            await _maybe_await(destroy())
+        else:
+            await self.shutdown()
+            return
+        self._runtime = None
+
+    @property
+    def sandbox(self) -> Any | None:
+        return None if self._runtime is None else self._runtime.sandbox
 
     @property
     def capabilities(self) -> tuple[str, ...] | None:
