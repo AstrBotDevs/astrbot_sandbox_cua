@@ -8,16 +8,57 @@ from typing import Any
 
 from astrbot.api import logger
 from astrbot.core.computer.booters.base import ComputerBooter
+from astrbot.core.computer.sandbox_timeouts import resolve_sandbox_timeout
 from astrbot.core.star.context import Context
 
 from .booters import cua as cua_booter
 
 BootHook = Callable[[Context, str, str, dict], Awaitable[ComputerBooter]]
+_CUA_TTL_TIMEOUT_KEY = "sandbox_ttl"
+_CUA_LEGACY_TTL_KEY = "cua_ttl"
+_CUA_TTL_TIMEOUT_ALIASES = (_CUA_LEGACY_TTL_KEY,)
+_CUA_DEFAULT_TTL_SECONDS = 3600
+_CUA_IDLE_TIMEOUT_KEY = "sandbox_idle_timeout"
+_CUA_LEGACY_IDLE_TIMEOUT_KEY = "cua_idle_timeout"
+_CUA_IDLE_TIMEOUT_ALIASES = (_CUA_LEGACY_IDLE_TIMEOUT_KEY,)
+_CUA_DEFAULT_IDLE_TIMEOUT_SECONDS = 0.0
+DOCKER_UNAVAILABLE_ERROR = "Docker is not installed or not running"
+
+
+def _is_docker_unavailable_error(exc: Exception) -> bool:
+    detail = str(exc).lower()
+    return (
+        "cannot connect to docker engine" in detail
+        or "failed to connect to docker daemon" in detail
+        or DOCKER_UNAVAILABLE_ERROR.lower() in detail
+        or ("cannot connect to unix socket" in detail and "docker.sock" in detail)
+    )
+
+
+def _resolve_cua_ttl(config: Mapping[str, Any]) -> int:
+    return int(
+        resolve_sandbox_timeout(
+            config,
+            _CUA_TTL_TIMEOUT_KEY,
+            aliases=_CUA_TTL_TIMEOUT_ALIASES,
+            default=_CUA_DEFAULT_TTL_SECONDS,
+        )
+    )
+
+
+def _resolve_cua_idle_timeout(config: Mapping[str, Any]) -> float:
+    return resolve_sandbox_timeout(
+        config,
+        _CUA_IDLE_TIMEOUT_KEY,
+        aliases=_CUA_IDLE_TIMEOUT_ALIASES,
+        default=_CUA_DEFAULT_IDLE_TIMEOUT_SECONDS,
+    )
 
 
 class CuaSandboxProvider:
     provider_id = "cua"
     capabilities = {"shell", "python", "filesystem", "screenshot", "mouse", "keyboard"}
+    supports_persistent_reconnect = True
     tool_names = {
         "astrbot_cua_screenshot",
         "astrbot_cua_mouse_click",
@@ -35,6 +76,10 @@ class CuaSandboxProvider:
         )
         self._boot_hook = boot_hook
 
+    @staticmethod
+    def _persistent_name(config: dict, fallback: str) -> str:
+        return str(config.get("persistent_name") or fallback).strip()
+
     def _merged_sandbox_config(self, context: Context, session_id: str) -> dict:
         """Return sandbox config with plugin_config as base and user settings overriding."""
         config = context.get_config(umo=session_id)
@@ -51,6 +96,11 @@ class CuaSandboxProvider:
 
     def build_create_config(self, context: Context, session_id: str) -> dict:
         sandbox_cfg = self._merged_sandbox_config(context, session_id)
+        sandbox_cfg = {
+            **sandbox_cfg,
+            _CUA_LEGACY_TTL_KEY: _resolve_cua_ttl(sandbox_cfg),
+            _CUA_LEGACY_IDLE_TIMEOUT_KEY: _resolve_cua_idle_timeout(sandbox_cfg),
+        }
         booter_kwargs = cua_booter.build_cua_booter_kwargs(sandbox_cfg)
         if not booter_kwargs.get("api_key") and not os.environ.get("CUA_API_KEY"):
             booter_kwargs["local"] = True
@@ -62,21 +112,100 @@ class CuaSandboxProvider:
             "local": config.get("local", True),
             "image": config.get("image"),
             "os_type": config.get("os_type"),
+            "persistent_name": self._persistent_name(
+                config,
+                str(config.get("sandbox_id") or sandbox_name),
+            ),
         }
 
     def update_connect_info(self, record: dict, *, sandbox_name: str) -> dict:
         connect_info = dict(record.get("connect_info") or {})
         connect_info["name"] = sandbox_name
+        connect_info.setdefault(
+            "persistent_name",
+            str(record.get("sandbox_id") or sandbox_name).strip(),
+        )
         return connect_info
+
+    def _resolve_create_persistent_name(self, config: dict, sandbox_id: str) -> str:
+        persistent_name = self._persistent_name(config, sandbox_id)
+        if not config.get("resume") or not config.get("local", True):
+            return persistent_name
+        if persistent_name == sandbox_id:
+            return persistent_name
+        try:
+            from cua_sandbox import sandbox_state
+        except ImportError:
+            return persistent_name
+        persistent_state = sandbox_state.load(persistent_name)
+        sandbox_id_state = sandbox_state.load(sandbox_id)
+        if persistent_state is None and sandbox_id_state is not None:
+            return sandbox_id
+        return persistent_name
 
     def get_idle_timeout(self, context: Context, session_id: str) -> float:
         sandbox_cfg = self._merged_sandbox_config(context, session_id)
-        value = sandbox_cfg.get("cua_idle_timeout", 0)
+        return _resolve_cua_idle_timeout(sandbox_cfg)
+
+    async def check_persistent_sandbox_exists(self, record: dict) -> bool:
         try:
-            timeout = float(value)
-        except (TypeError, ValueError):
-            return 0.0
-        return max(timeout, 0.0)
+            from cua import Sandbox
+        except ImportError as exc:
+            raise RuntimeError(
+                "CUA sandbox support requires the optional `cua` package. "
+                "Install it with `pip install cua` in the AstrBot environment."
+            ) from exc
+
+        connect_info = dict(record.get("connect_info") or {})
+        sandbox_name = str(
+            connect_info.get("persistent_name")
+            or connect_info.get("name")
+            or record.get("sandbox_id")
+            or ""
+        ).strip()
+        if not sandbox_name:
+            return False
+
+        connect = getattr(Sandbox, "connect", None)
+        if not callable(connect):
+            return True
+
+        connect_kwargs = {"local": connect_info.get("local", True)}
+        api_key = connect_info.get("api_key") or self.plugin_config.get("api_key")
+        if api_key:
+            connect_kwargs["api_key"] = api_key
+        if connect_kwargs["local"]:
+            try:
+                from cua_sandbox import sandbox_state
+            except ImportError:
+                pass
+            else:
+                if sandbox_state.load(sandbox_name) is not None:
+                    return True
+        try:
+            sandbox = await connect(sandbox_name, **connect_kwargs)
+        except Exception as exc:
+            if cua_booter._is_missing_persistent_sandbox_error(exc):
+                resume = getattr(Sandbox, "resume", None)
+                if not callable(resume):
+                    return False
+                try:
+                    sandbox = await resume(sandbox_name, **connect_kwargs)
+                except Exception as resume_exc:
+                    if cua_booter._is_missing_persistent_sandbox_error(resume_exc):
+                        return False
+                    raise
+                else:
+                    disconnect = getattr(sandbox, "disconnect", None)
+                    if callable(disconnect):
+                        await disconnect()
+                    return True
+            raise
+
+        disconnect = getattr(sandbox, "disconnect", None)
+        if callable(disconnect):
+            await disconnect()
+        return True
 
     async def create_booter(
         self,
@@ -88,10 +217,20 @@ class CuaSandboxProvider:
         if self._boot_hook is not None:
             return await self._boot_hook(context, session_id, sandbox_id, config)
         uuid_str = uuid.uuid5(uuid.NAMESPACE_DNS, session_id).hex
-        client = cua_booter.CuaBooter(**config)
+        persistent = True
+        persistent_name = self._resolve_create_persistent_name(config, sandbox_id)
+        booter_config = {
+            **config,
+            "persistent": persistent,
+            "persistent_name": persistent_name,
+            "resume": bool(config.get("resume", False)),
+        }
+        client = cua_booter.CuaBooter(
+            **booter_config,
+        )
         started_at = time.monotonic()
         logger.info(
-            "[Computer] CUA managed sandbox boot start: sandbox_id=%s session_id=%s boot_session_id=%s image=%s os_type=%s local=%s ttl=%s",
+            "[Computer] CUA managed sandbox boot start: sandbox_id=%s session_id=%s boot_session_id=%s image=%s os_type=%s local=%s ttl=%s persistent=%s persistent_name=%s resume=%s",
             sandbox_id,
             session_id,
             uuid_str,
@@ -99,11 +238,14 @@ class CuaSandboxProvider:
             config.get("os_type"),
             config.get("local"),
             config.get("ttl"),
+            persistent,
+            persistent_name,
+            bool(config.get("resume", False)),
         )
         try:
             await client.boot(uuid_str)
             setattr(client, "sandbox_id", sandbox_id)
-        except Exception:
+        except Exception as exc:
             logger.warning(
                 "[Computer] CUA managed sandbox boot failed: sandbox_id=%s session_id=%s elapsed_ms=%d",
                 sandbox_id,
@@ -119,14 +261,22 @@ class CuaSandboxProvider:
                     session_id,
                     shutdown_error,
                 )
+            if isinstance(exc, RuntimeError) and _is_docker_unavailable_error(exc):
+                raise RuntimeError(DOCKER_UNAVAILABLE_ERROR) from exc
             raise
         logger.info(
-            "[Computer] CUA managed sandbox boot done: sandbox_id=%s session_id=%s elapsed_ms=%d",
+            "[Computer] CUA managed sandbox boot done: sandbox_id=%s session_id=%s elapsed_ms=%d persistent=%s persistent_name=%s",
             sandbox_id,
             session_id,
             int((time.monotonic() - started_at) * 1000),
+            persistent,
+            persistent_name,
         )
         return client
 
     async def destroy_booter(self, booter: ComputerBooter, record: dict) -> None:
+        destroy = getattr(booter, "destroy", None)
+        if callable(destroy):
+            await destroy()
+            return
         await booter.shutdown()
