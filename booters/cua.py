@@ -49,8 +49,11 @@ def _is_missing_persistent_sandbox_error(exc: Exception) -> bool:
     detail = str(exc).lower()
     return (
         "no local sandbox named" in detail
-        or "not found" in detail
-        or "does not exist" in detail
+        or "local sandbox" in detail
+        and ("not found" in detail or "does not exist" in detail)
+        or "sandbox" in detail
+        and "state" in detail
+        and ("not found" in detail or "does not exist" in detail)
     )
 
 
@@ -73,18 +76,18 @@ async def _write_base64_via_shell(
     if _has_explicit_command_failure(mkdir_result):
         return mkdir_result
 
-    await shell.exec(f"rm -f {shlex.quote(encoded_path)}")
-    chunk_size = 60_000
-    for offset in range(0, len(encoded), chunk_size):
-        chunk = encoded[offset : offset + chunk_size]
-        write_result = await shell.exec(
-            f"cat >> {shlex.quote(encoded_path)} <<'EOF'\n{chunk}\nEOF"
-        )
-        if _has_explicit_command_failure(write_result):
-            await shell.exec(f"rm -f {shlex.quote(encoded_path)}")
-            return write_result
+    try:
+        await shell.exec(f"rm -f {shlex.quote(encoded_path)}")
+        chunk_size = 60_000
+        for offset in range(0, len(encoded), chunk_size):
+            chunk = encoded[offset : offset + chunk_size]
+            write_result = await shell.exec(
+                f"cat >> {shlex.quote(encoded_path)} <<'EOF'\n{chunk}\nEOF"
+            )
+            if _has_explicit_command_failure(write_result):
+                return write_result
 
-    decoder = """
+        decoder = """
 import base64
 import pathlib
 import sys
@@ -93,7 +96,6 @@ target = pathlib.Path(sys.argv[1])
 encoded_path = pathlib.Path(sys.argv[2])
 target.write_bytes(base64.b64decode(encoded_path.read_text()))
 """.strip()
-    try:
         return await shell.exec(
             f"python3 - {shlex.quote(path)} {shlex.quote(encoded_path)} <<'PY'\n"
             f"{decoder}\nPY"
@@ -835,7 +837,7 @@ class CuaBooter(ComputerBooter):
             else:
                 disconnect = getattr(sandbox, "disconnect", None)
                 if callable(disconnect):
-                    await disconnect()
+                    await _maybe_await(disconnect())
             self._runtime = None
             raise
         logger.info(
@@ -907,14 +909,17 @@ class CuaBooter(ComputerBooter):
         return kwargs
 
     async def shutdown(self) -> None:
-        if self._runtime is not None:
-            if self._runtime.sandbox_cm is not None:
-                await self._runtime.sandbox_cm.__aexit__(None, None, None)
-            else:
-                disconnect = getattr(self._runtime.sandbox, "disconnect", None)
-                if callable(disconnect):
-                    await disconnect()
-            self._runtime = None
+        runtime = self._runtime
+        if runtime is not None:
+            try:
+                if runtime.sandbox_cm is not None:
+                    await runtime.sandbox_cm.__aexit__(None, None, None)
+                else:
+                    disconnect = getattr(runtime.sandbox, "disconnect", None)
+                    if callable(disconnect):
+                        await _maybe_await(disconnect())
+            finally:
+                self._runtime = None
 
     async def destroy(self) -> None:
         name = str(self.persistent_name or "").strip()
@@ -931,7 +936,10 @@ class CuaBooter(ComputerBooter):
             ) from exc
         delete = getattr(Sandbox, "delete", None)
         if not callable(delete):
-            return
+            raise RuntimeError(
+                "CUA persistent deletion is unavailable: Sandbox.delete is missing. "
+                "Please update the installed cua package."
+            )
         try:
             await delete(name, **self._build_persistent_kwargs())
         except Exception as exc:
