@@ -45,6 +45,18 @@ async def _maybe_await(value: Any) -> Any:
     return value
 
 
+def _is_missing_persistent_sandbox_error(exc: Exception) -> bool:
+    detail = str(exc).lower()
+    return (
+        "no local sandbox named" in detail
+        or "local sandbox" in detail
+        and ("not found" in detail or "does not exist" in detail)
+        or "sandbox" in detail
+        and "state" in detail
+        and ("not found" in detail or "does not exist" in detail)
+    )
+
+
 def build_cua_booter_kwargs(sandbox_cfg: dict[str, Any]) -> dict[str, Any]:
     return {
         name: sandbox_cfg.get(config_key, CUA_DEFAULT_CONFIG[name])
@@ -58,13 +70,38 @@ async def _write_base64_via_shell(
     data: bytes,
 ) -> dict[str, Any]:
     encoded = base64.b64encode(data).decode("ascii")
-    decoder = (
-        "import base64,pathlib,sys; "
-        "pathlib.Path(sys.argv[1]).write_bytes(base64.b64decode(sys.stdin.read()))"
-    )
-    return await shell.exec(
-        f"python3 -c {shlex.quote(decoder)} {shlex.quote(path)} <<'EOF'\n{encoded}\nEOF"
-    )
+    target = Path(path)
+    encoded_path = f"{path}.b64"
+    mkdir_result = await shell.exec(f"mkdir -p {shlex.quote(str(target.parent))}")
+    if _has_explicit_command_failure(mkdir_result):
+        return mkdir_result
+
+    try:
+        await shell.exec(f"rm -f {shlex.quote(encoded_path)}")
+        chunk_size = 60_000
+        for offset in range(0, len(encoded), chunk_size):
+            chunk = encoded[offset : offset + chunk_size]
+            write_result = await shell.exec(
+                f"cat >> {shlex.quote(encoded_path)} <<'EOF'\n{chunk}\nEOF"
+            )
+            if _has_explicit_command_failure(write_result):
+                return write_result
+
+        decoder = """
+import base64
+import pathlib
+import sys
+
+target = pathlib.Path(sys.argv[1])
+encoded_path = pathlib.Path(sys.argv[2])
+target.write_bytes(base64.b64decode(encoded_path.read_text()))
+""".strip()
+        return await shell.exec(
+            f"python3 - {shlex.quote(path)} {shlex.quote(encoded_path)} <<'PY'\n"
+            f"{decoder}\nPY"
+        )
+    finally:
+        await shell.exec(f"rm -f {shlex.quote(encoded_path)}")
 
 
 @dataclass(slots=True)
@@ -105,6 +142,18 @@ def _maybe_model_dump(value: Any) -> dict[str, Any]:
     if attr_payload:
         return attr_payload
     return {}
+
+
+def _has_explicit_command_failure(raw: Any) -> bool:
+    payload = _maybe_model_dump(raw)
+    if payload.get("success") is False:
+        return True
+    exit_code = payload.get("exit_code")
+    if exit_code is None:
+        exit_code = payload.get("returncode")
+    if exit_code is None:
+        exit_code = payload.get("return_code")
+    return exit_code not in (None, 0)
 
 
 def _slice_content_by_lines(
@@ -718,7 +767,7 @@ def _screenshot_to_bytes(raw: Any) -> bytes:
 
 @dataclass(slots=True)
 class _CuaRuntime:
-    sandbox_cm: Any
+    sandbox_cm: Any | None
     sandbox: Any
     persistent: bool
     shell: CuaShellComponent
@@ -736,6 +785,7 @@ class CuaBooter(ComputerBooter):
         telemetry_enabled: bool = CUA_DEFAULT_CONFIG["telemetry_enabled"],
         local: bool = CUA_DEFAULT_CONFIG["local"],
         api_key: str = CUA_DEFAULT_CONFIG["api_key"],
+        persistent: bool = False,
         persistent_name: str | None = None,
         resume: bool = False,
     ) -> None:
@@ -745,12 +795,18 @@ class CuaBooter(ComputerBooter):
         self.telemetry_enabled = telemetry_enabled
         self.local = local
         self.api_key = api_key
+        self.persistent = persistent
         self.persistent_name = persistent_name
         self.resume = resume
         self._runtime: _CuaRuntime | None = None
 
     async def boot(self, session_id: str) -> None:
         _ = session_id
+        logger.info(
+            "[Computer] Booting CUA sandbox: image=%s, os_type=%s",
+            self.image,
+            self.os_type,
+        )
         try:
             from cua import Image, Sandbox
         except ImportError as exc:
@@ -760,28 +816,9 @@ class CuaBooter(ComputerBooter):
             ) from exc
 
         image_obj = self._build_image(Image)
-        if self.persistent_name:
-            sandbox_cm = None
-            if self.resume:
-                try:
-                    sandbox = await Sandbox.connect(
-                        self.persistent_name,
-                        **self._build_connect_kwargs(Sandbox.connect),
-                    )
-                except Exception:
-                    resume = getattr(Sandbox, "resume", None)
-                    if resume is None:
-                        raise
-                    sandbox = await resume(
-                        self.persistent_name,
-                        **self._build_resume_kwargs(resume),
-                    )
-            else:
-                sandbox = await Sandbox.create(
-                    image_obj,
-                    name=self.persistent_name,
-                    **self._build_persistent_create_kwargs(Sandbox.create),
-                )
+        sandbox_cm = None
+        if self.persistent:
+            sandbox = await self._boot_persistent(Sandbox, image_obj)
         else:
             ephemeral_kwargs = self._build_ephemeral_kwargs(Sandbox.ephemeral)
             sandbox_cm = Sandbox.ephemeral(image_obj, **ephemeral_kwargs)
@@ -790,7 +827,7 @@ class CuaBooter(ComputerBooter):
             self._runtime = _CuaRuntime(
                 sandbox_cm=sandbox_cm,
                 sandbox=sandbox,
-                persistent=bool(self.persistent_name),
+                persistent=self.persistent,
                 shell=CuaShellComponent(sandbox, os_type=self.os_type),
                 python=CuaPythonComponent(sandbox, os_type=self.os_type),
                 fs=CuaFileSystemComponent(sandbox, os_type=self.os_type),
@@ -800,21 +837,16 @@ class CuaBooter(ComputerBooter):
             if sandbox_cm is not None:
                 await sandbox_cm.__aexit__(None, None, None)
             else:
-                if self.resume:
-                    disconnect = getattr(sandbox, "disconnect", None)
-                    if disconnect is not None:
-                        await _maybe_await(disconnect())
-                else:
-                    destroy = getattr(sandbox, "destroy", None)
-                    if destroy is not None:
-                        await _maybe_await(destroy())
+                disconnect = getattr(sandbox, "disconnect", None)
+                if callable(disconnect):
+                    await _maybe_await(disconnect())
             self._runtime = None
             raise
         logger.info(
             "[Computer] CUA sandbox booted: image=%s, os_type=%s, persistent=%s, resume=%s",
             self.image,
             self.os_type,
-            bool(self.persistent_name),
+            self.persistent,
             self.resume,
         )
 
@@ -827,6 +859,42 @@ class CuaBooter(ComputerBooter):
         if callable(os_factory):
             return os_factory()
         return image_name
+
+    async def _boot_persistent(self, sandbox_cls: Any, image_obj: Any) -> Any:
+        name = str(self.persistent_name or "").strip()
+        if not name:
+            raise RuntimeError("persistent_name is required for persistent CUA sandbox")
+        kwargs = self._build_persistent_kwargs()
+        if self.resume:
+            connect = getattr(sandbox_cls, "connect", None)
+            if callable(connect):
+                try:
+                    return await connect(name, **kwargs)
+                except Exception as exc:
+                    if not _is_missing_persistent_sandbox_error(exc):
+                        raise
+            resume = getattr(sandbox_cls, "resume", None)
+            if not callable(resume):
+                raise RuntimeError("CUA Sandbox.resume is unavailable")
+            try:
+                return await resume(name, **kwargs)
+            except Exception as exc:
+                if _is_missing_persistent_sandbox_error(exc):
+                    raise RuntimeError(
+                        f"CUA persistent sandbox {name!r} could not be resumed"
+                    ) from exc
+                raise
+
+        create = getattr(sandbox_cls, "create", None)
+        if not callable(create):
+            raise RuntimeError("CUA Sandbox.create is unavailable")
+        return await create(image_obj, name=name, **kwargs)
+
+    def _build_persistent_kwargs(self) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {"local": self.local}
+        if self.api_key:
+            kwargs["api_key"] = self.api_key
+        return kwargs
 
     def _build_ephemeral_kwargs(self, ephemeral: Any) -> dict[str, Any]:
         try:
@@ -844,67 +912,44 @@ class CuaBooter(ComputerBooter):
             kwargs["api_key"] = self.api_key
         return kwargs
 
-    def _build_persistent_create_kwargs(self, create: Any) -> dict[str, Any]:
-        try:
-            parameters = inspect.signature(create).parameters
-        except (TypeError, ValueError):
-            return {}
-        kwargs: dict[str, Any] = {}
-        if "telemetry_enabled" in parameters:
-            kwargs["telemetry_enabled"] = self.telemetry_enabled
-        if "local" in parameters:
-            kwargs["local"] = self.local
-        if "api_key" in parameters and self.api_key:
-            kwargs["api_key"] = self.api_key
-        return kwargs
-
-    def _build_connect_kwargs(self, connect: Any) -> dict[str, Any]:
-        try:
-            parameters = inspect.signature(connect).parameters
-        except (TypeError, ValueError):
-            return {}
-        kwargs: dict[str, Any] = {}
-        if "telemetry_enabled" in parameters:
-            kwargs["telemetry_enabled"] = self.telemetry_enabled
-        if "local" in parameters:
-            kwargs["local"] = self.local
-        if "api_key" in parameters and self.api_key:
-            kwargs["api_key"] = self.api_key
-        return kwargs
-
-    def _build_resume_kwargs(self, resume: Any) -> dict[str, Any]:
-        try:
-            parameters = inspect.signature(resume).parameters
-        except (TypeError, ValueError):
-            return {}
-        kwargs: dict[str, Any] = {}
-        if "local" in parameters:
-            kwargs["local"] = self.local
-        if "api_key" in parameters and self.api_key:
-            kwargs["api_key"] = self.api_key
-        return kwargs
-
     async def shutdown(self) -> None:
-        if self._runtime is not None:
-            if self._runtime.persistent:
-                disconnect = getattr(self._runtime.sandbox, "disconnect", None)
-                if disconnect is not None:
-                    await _maybe_await(disconnect())
-            elif self._runtime.sandbox_cm is not None:
-                await self._runtime.sandbox_cm.__aexit__(None, None, None)
-            self._runtime = None
+        runtime = self._runtime
+        if runtime is not None:
+            try:
+                if runtime.sandbox_cm is not None:
+                    await runtime.sandbox_cm.__aexit__(None, None, None)
+                else:
+                    disconnect = getattr(runtime.sandbox, "disconnect", None)
+                    if callable(disconnect):
+                        await _maybe_await(disconnect())
+            finally:
+                self._runtime = None
 
     async def destroy(self) -> None:
-        if self._runtime is None:
-            return
-        sandbox = self._runtime.sandbox
-        destroy = getattr(sandbox, "destroy", None)
-        if destroy is not None:
-            await _maybe_await(destroy())
-        else:
+        name = str(self.persistent_name or "").strip()
+        if not self.persistent or not name:
             await self.shutdown()
             return
-        self._runtime = None
+        await self.shutdown()
+        try:
+            from cua import Sandbox
+        except ImportError as exc:
+            raise RuntimeError(
+                "CUA sandbox support requires the optional `cua` package. "
+                "Install it with `pip install cua` in the AstrBot environment."
+            ) from exc
+        delete = getattr(Sandbox, "delete", None)
+        if not callable(delete):
+            raise RuntimeError(
+                "CUA persistent deletion is unavailable: Sandbox.delete is missing. "
+                "Please update the installed cua package."
+            )
+        try:
+            await delete(name, **self._build_persistent_kwargs())
+        except Exception as exc:
+            if _is_missing_persistent_sandbox_error(exc):
+                return
+            raise
 
     @property
     def sandbox(self) -> Any | None:
