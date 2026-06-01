@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import inspect
 import shlex
-import uuid
 from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 from typing import Any
@@ -21,8 +20,6 @@ from .cua_defaults import CUA_CONFIG_KEYS, CUA_DEFAULT_CONFIG
 
 _POSIX_OS_TYPES = {"linux", "darwin", "macos"}
 _MAX_SEARCH_LINE_COLUMNS = 1000
-# Keep each shell append command comfortably below typical ARG_MAX limits.
-_BASE64_SHELL_CHUNK_SIZE = 48_000
 
 _CUA_BACKGROUND_LAUNCHER = """
 import subprocess, sys, time
@@ -48,24 +45,6 @@ async def _maybe_await(value: Any) -> Any:
     return value
 
 
-def _shell_result_failed(result: dict[str, Any]) -> bool:
-    success = result.get("success")
-    if success is not None:
-        return not bool(success)
-    exit_code = result.get("exit_code")
-    if exit_code is not None:
-        return exit_code != 0
-    return False
-
-
-async def _cleanup_encoded_file(
-    shell: ShellComponent,
-    encoded_path: Path,
-) -> None:
-    # Best-effort cleanup; encoded_path may already be gone if the decoder succeeded.
-    await shell.exec(f"rm -f {shlex.quote(str(encoded_path))}")
-
-
 def build_cua_booter_kwargs(sandbox_cfg: dict[str, Any]) -> dict[str, Any]:
     return {
         name: sandbox_cfg.get(config_key, CUA_DEFAULT_CONFIG[name])
@@ -79,36 +58,13 @@ async def _write_base64_via_shell(
     data: bytes,
 ) -> dict[str, Any]:
     encoded = base64.b64encode(data).decode("ascii")
-    target_path = Path(path)
-    encoded_path = target_path.with_name(f".{target_path.name}.{uuid.uuid4().hex}.b64")
-    try:
-        setup_result = await shell.exec(
-            f"mkdir -p {shlex.quote(str(target_path.parent))} && : > {shlex.quote(str(encoded_path))}"
-        )
-        if _shell_result_failed(setup_result):
-            return setup_result
-
-        for start in range(0, len(encoded), _BASE64_SHELL_CHUNK_SIZE):
-            chunk = encoded[start : start + _BASE64_SHELL_CHUNK_SIZE]
-            append_result = await shell.exec(
-                f"cat <<'EOF' >> {shlex.quote(str(encoded_path))}\n{chunk}\nEOF"
-            )
-            if _shell_result_failed(append_result):
-                return append_result
-
-        decoder = "\n".join(
-            [
-                "import base64, pathlib, sys",
-                "encoded_path = pathlib.Path(sys.argv[1])",
-                "target_path = pathlib.Path(sys.argv[2])",
-                "target_path.write_bytes(base64.b64decode(encoded_path.read_bytes()))",
-            ]
-        )
-        return await shell.exec(
-            f"python3 - {shlex.quote(str(encoded_path))} {shlex.quote(path)} <<'PY'\n{decoder}\nPY"
-        )
-    finally:
-        await _cleanup_encoded_file(shell, encoded_path)
+    decoder = (
+        "import base64,pathlib,sys; "
+        "pathlib.Path(sys.argv[1]).write_bytes(base64.b64decode(sys.stdin.read()))"
+    )
+    return await shell.exec(
+        f"python3 -c {shlex.quote(decoder)} {shlex.quote(path)} <<'EOF'\n{encoded}\nEOF"
+    )
 
 
 @dataclass(slots=True)
@@ -760,22 +716,10 @@ def _screenshot_to_bytes(raw: Any) -> bytes:
     raise TypeError(f"Unsupported CUA screenshot result: {type(raw)!r}")
 
 
-def _is_missing_persistent_sandbox_error(exc: Exception) -> bool:
-    if isinstance(exc, ValueError):
-        message = str(exc).lower()
-        return (
-            "no local sandbox named" in message
-            or "not found in state files" in message
-            or ("not found" in message and "sandbox" in message)
-        )
-    return False
-
-
 @dataclass(slots=True)
 class _CuaRuntime:
+    sandbox_cm: Any
     sandbox: Any
-    close: Any
-    close_with_exc: bool
     shell: CuaShellComponent
     python: CuaPythonComponent
     fs: CuaFileSystemComponent
@@ -791,9 +735,6 @@ class CuaBooter(ComputerBooter):
         telemetry_enabled: bool = CUA_DEFAULT_CONFIG["telemetry_enabled"],
         local: bool = CUA_DEFAULT_CONFIG["local"],
         api_key: str = CUA_DEFAULT_CONFIG["api_key"],
-        persistent: bool = False,
-        persistent_name: str | None = None,
-        resume: bool = False,
     ) -> None:
         self.image = image
         self.os_type = os_type
@@ -801,12 +742,15 @@ class CuaBooter(ComputerBooter):
         self.telemetry_enabled = telemetry_enabled
         self.local = local
         self.api_key = api_key
-        self.persistent = persistent
-        self.persistent_name = persistent_name
-        self.resume = resume
         self._runtime: _CuaRuntime | None = None
 
     async def boot(self, session_id: str) -> None:
+        _ = session_id
+        logger.info(
+            "[Computer] Booting CUA sandbox: image=%s, os_type=%s",
+            self.image,
+            self.os_type,
+        )
         try:
             from cua import Image, Sandbox
         except ImportError as exc:
@@ -815,100 +759,28 @@ class CuaBooter(ComputerBooter):
                 "Install it with `pip install cua` in the AstrBot environment."
             ) from exc
 
-        close_action = None
-        close_with_exc = False
-        if self.persistent:
-            sandbox = await self._boot_persistent_sandbox(Image, Sandbox)
-            close_action = sandbox.disconnect
-        else:
-            sandbox, close_action = await self._boot_ephemeral_sandbox(Image, Sandbox)
-            close_with_exc = True
+        image_obj = self._build_image(Image)
+        ephemeral_kwargs = self._build_ephemeral_kwargs(Sandbox.ephemeral)
+        sandbox_cm = Sandbox.ephemeral(image_obj, **ephemeral_kwargs)
+        sandbox = await sandbox_cm.__aenter__()
         try:
             self._runtime = _CuaRuntime(
+                sandbox_cm=sandbox_cm,
                 sandbox=sandbox,
-                close=close_action,
-                close_with_exc=close_with_exc,
                 shell=CuaShellComponent(sandbox, os_type=self.os_type),
                 python=CuaPythonComponent(sandbox, os_type=self.os_type),
                 fs=CuaFileSystemComponent(sandbox, os_type=self.os_type),
                 gui=CuaGUIComponent(sandbox),
             )
         except Exception:
-            await self._close_sandbox(sandbox, close_action, close_with_exc)
+            await sandbox_cm.__aexit__(None, None, None)
             self._runtime = None
             raise
         logger.info(
-            "[Computer] CUA sandbox booted: image=%s, os_type=%s persistent=%s persistent_name=%s resume=%s runtime_name=%s",
+            "[Computer] CUA sandbox booted: image=%s, os_type=%s",
             self.image,
             self.os_type,
-            self.persistent,
-            self.persistent_name,
-            self.resume,
-            getattr(sandbox, "name", None),
         )
-
-    async def _boot_ephemeral_sandbox(
-        self, image_cls: Any, sandbox_cls: Any
-    ) -> tuple[Any, Any]:
-        image_obj = self._build_image(image_cls)
-        ephemeral_kwargs = self._build_ephemeral_kwargs(sandbox_cls.ephemeral)
-        sandbox_cm = sandbox_cls.ephemeral(image_obj, **ephemeral_kwargs)
-        sandbox = await sandbox_cm.__aenter__()
-        return sandbox, sandbox_cm.__aexit__
-
-    async def _boot_persistent_sandbox(self, image_cls: Any, sandbox_cls: Any) -> Any:
-        sandbox_name = self._persistent_runtime_name()
-        if self.resume:
-            try:
-                logger.info(
-                    "[Computer] CUA persistent sandbox resume requested: name=%s local=%s",
-                    sandbox_name,
-                    self.local,
-                )
-                connect = getattr(sandbox_cls, "connect", None)
-                if not callable(connect):
-                    raise ValueError(
-                        f"No local sandbox named '{sandbox_name}' found. Check ~/.cua/sandboxes/ or create it with Sandbox.create()."
-                    )
-                connect_kwargs = {"local": self.local}
-                if self.api_key:
-                    connect_kwargs["api_key"] = self.api_key
-                return await connect(sandbox_name, **connect_kwargs)
-            except Exception as exc:
-                if not _is_missing_persistent_sandbox_error(exc):
-                    raise
-                logger.info(
-                    "[Computer] CUA persistent sandbox connect failed, falling back to resume: name=%s error=%s",
-                    sandbox_name,
-                    exc,
-                )
-                try:
-                    resume_kwargs = {"local": self.local}
-                    if self.api_key:
-                        resume_kwargs["api_key"] = self.api_key
-                    return await sandbox_cls.resume(sandbox_name, **resume_kwargs)
-                except Exception as resume_exc:
-                    if not _is_missing_persistent_sandbox_error(resume_exc):
-                        raise
-                    raise RuntimeError(
-                        f"CUA persistent sandbox {sandbox_name!r} could not be resumed"
-                    ) from resume_exc
-
-        image_obj = self._build_image(image_cls)
-        create_kwargs = self._build_persistent_create_kwargs(sandbox_cls.create)
-        return await sandbox_cls.create(image_obj, **create_kwargs)
-
-    def _persistent_runtime_name(self) -> str:
-        if self.persistent_name:
-            return self.persistent_name
-        raise RuntimeError("persistent_name is required for persistent CUA sandboxes")
-
-    def _build_persistent_create_kwargs(self, create: Any) -> dict[str, Any]:
-        kwargs = self._build_ephemeral_kwargs(create)
-        kwargs["name"] = self._persistent_runtime_name()
-        if "local" in inspect.signature(create).parameters:
-            kwargs["local"] = self.local
-        return kwargs
 
     def _build_image(self, image_cls: Any) -> Any:
         image_name = (self.image or self.os_type or "linux").strip().lower()
@@ -938,55 +810,8 @@ class CuaBooter(ComputerBooter):
 
     async def shutdown(self) -> None:
         if self._runtime is not None:
-            await self._close_sandbox(
-                self._runtime.sandbox,
-                self._runtime.close,
-                self._runtime.close_with_exc,
-            )
+            await self._runtime.sandbox_cm.__aexit__(None, None, None)
             self._runtime = None
-
-    async def destroy(self) -> None:
-        try:
-            from cua import Sandbox
-        except ImportError as exc:
-            raise RuntimeError(
-                "CUA sandbox support requires the optional `cua` package. "
-                "Install it with `pip install cua` in the AstrBot environment."
-            ) from exc
-
-        sandbox_name = None
-        if self._runtime is not None:
-            sandbox_name = getattr(self._runtime.sandbox, "name", None)
-        sandbox_name = sandbox_name or self.persistent_name
-        if not sandbox_name:
-            raise RuntimeError(
-                "Cannot destroy CUA sandbox without a persistent runtime name"
-            )
-
-        delete_kwargs = {"local": self.local}
-        if self.api_key:
-            delete_kwargs["api_key"] = self.api_key
-
-        if self._runtime is not None:
-            await self.shutdown()
-
-        try:
-            await Sandbox.delete(sandbox_name, **delete_kwargs)
-        except Exception as exc:
-            if not _is_missing_persistent_sandbox_error(exc):
-                raise
-        self._runtime = None
-
-    async def _close_sandbox(
-        self,
-        sandbox: Any,
-        close_action: Any,
-        close_with_exc: bool,
-    ) -> None:
-        if close_with_exc:
-            await close_action(None, None, None)
-            return
-        await close_action()
 
     @property
     def capabilities(self) -> tuple[str, ...] | None:
