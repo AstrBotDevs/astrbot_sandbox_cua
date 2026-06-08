@@ -43,7 +43,7 @@ git clone https://github.com/zouyonghe/astrbot_sandbox_cua.git data/plugins/astr
 | 键名 | 说明 |
 | --- | --- |
 | `cua_image` | 沙盒镜像或系统类型。通常和 `cua_os_type` 保持一致，除非你明确知道目标运行时需要不同镜像。 |
-| `cua_os_type` | 支持的操作系统类型：`linux`、`macos`、`windows`、`android`。 |
+| `cua_os_type` | 可配置的操作系统类型：`linux`、`macos`、`windows`、`android`。本插件已针对 Linux 沙盒进行测试验证，其他 OS 类型依赖上游 CUA 运行时支持，不保证可用。 |
 | `cua_ttl` | 沙盒生命周期，单位秒。 |
 | `cua_idle_timeout` | 空闲回收时间，单位秒。`0` 表示不自动回收。 |
 | `cua_telemetry_enabled` | 是否允许上游 CUA SDK 发送匿名使用和诊断数据，用于改进稳定性和兼容性。 |
@@ -65,6 +65,7 @@ git clone https://github.com/zouyonghe/astrbot_sandbox_cua.git data/plugins/astr
 - 需要可用的 CUA 环境。
 - 当 `cua_local=false` 时，需要提供 CUA API Key。
 - 该插件的可用能力受上游 CUA SDK 兼容性影响。
+- 当前维护和测试目标是 Linux 沙盒。macOS、Windows、Android 模式仅作为上游兼容配置暴露，不保证在所有环境中可用。
 - GUI 能力是否完整可用，取决于所选镜像和 OS 类型。
 - 该插件不提供 Bay / Shipyard Neo 的浏览器技能生命周期能力。
 

@@ -43,7 +43,7 @@ Configuration path:
 | Key | Description |
 | --- | --- |
 | `cua_image` | Sandbox image or system type. Keep it aligned with `cua_os_type` unless you know the target runtime needs a different image. |
-| `cua_os_type` | Supported OS types: `linux`, `macos`, `windows`, `android`. |
+| `cua_os_type` | Supported OS type setting: `linux`, `macos`, `windows`, `android`. This plugin has been tested and verified with Linux sandboxes. Other OS types depend on upstream CUA runtime support and are not guaranteed to work. |
 | `cua_ttl` | Sandbox lifetime in seconds. |
 | `cua_idle_timeout` | Idle cleanup timeout in seconds. `0` disables idle cleanup. |
 | `cua_telemetry_enabled` | Allows the upstream CUA SDK to send anonymous usage and diagnostic data to improve stability and compatibility. |
@@ -65,6 +65,7 @@ Configuration path:
 - A compatible CUA runtime environment is required.
 - A CUA API key is required when `cua_local=false`.
 - This plugin depends on the behavior and compatibility of the upstream CUA SDK.
+- The maintained and tested target is Linux sandbox execution. macOS, Windows, and Android sandbox modes are exposed for upstream compatibility, but this plugin does not guarantee they are usable in every environment.
 - GUI capability depends on the selected CUA image and OS type.
 - This plugin does not add browser-specific Bay or Shipyard Neo lifecycle features.
 
