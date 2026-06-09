@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -112,6 +113,7 @@ for name, module in {
 
 from astrbot_sandbox_cua import provider as provider_module  # noqa: E402
 from astrbot_sandbox_cua import main as plugin_main  # noqa: E402
+from astrbot_sandbox_cua.booters import cua as cua_module  # noqa: E402
 from astrbot_sandbox_cua.booters.cua import (  # noqa: E402
     CuaBooter,
     _write_base64_via_shell,
@@ -462,6 +464,41 @@ async def test_cua_booter_available_probes_runtime(monkeypatch):
 
     booter = CuaBooter(local=True, persistent=True, persistent_name="cua-stale")
     booter._runtime = SimpleNamespace(shell=StaleShell())
+
+    assert await booter.available() is False
+
+
+@pytest.mark.asyncio
+async def test_cua_booter_available_times_out_unresponsive_runtime(monkeypatch):
+    class HangingShell:
+        async def exec(self, command):
+            await asyncio.sleep(60)
+            return {"success": True}
+
+    monkeypatch.setattr(cua_module, "_CUA_HEALTH_CHECK_TIMEOUT_SECONDS", 0.01)
+    booter = CuaBooter(local=True, persistent=True, persistent_name="cua-stale")
+    booter._runtime = SimpleNamespace(shell=HangingShell())
+
+    assert await booter.available() is False
+
+
+@pytest.mark.asyncio
+async def test_cua_booter_available_propagates_cancellation():
+    class CancellingShell:
+        async def exec(self, command):
+            raise asyncio.CancelledError
+
+    booter = CuaBooter(local=True, persistent=True, persistent_name="cua-stale")
+    booter._runtime = SimpleNamespace(shell=CancellingShell())
+
+    with pytest.raises(asyncio.CancelledError):
+        await booter.available()
+
+
+@pytest.mark.asyncio
+async def test_cua_booter_available_handles_missing_shell():
+    booter = CuaBooter(local=True, persistent=True, persistent_name="cua-stale")
+    booter._runtime = SimpleNamespace()
 
     assert await booter.available() is False
 
