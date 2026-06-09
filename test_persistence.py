@@ -9,7 +9,6 @@ import sys
 import types
 
 
-
 class _DummyLogger:
     def warning(self, *args, **kwargs):
         pass
@@ -23,15 +22,17 @@ astrbot_api = types.ModuleType("astrbot.api")
 astrbot_api.logger = _DummyLogger()
 astrbot_api.FunctionTool = type("FunctionTool", (), {})
 astrbot_api_event = types.ModuleType("astrbot.api.event")
-astrbot_api_event.filter = SimpleNamespace(command=lambda *a, **k: (lambda f: f))
+astrbot_api_event.filter = SimpleNamespace(command=lambda *a, **k: lambda f: f)
 astrbot_api_star = types.ModuleType("astrbot.api.star")
 astrbot_api_star.Context = type("Context", (), {})
 astrbot_api_star.Star = type("Star", (), {"__init__": lambda self, context: None})
-astrbot_api_star.register = lambda *a, **k: (lambda cls: cls)
+astrbot_api_star.register = lambda *a, **k: lambda cls: cls
 astrbot_core = types.ModuleType("astrbot.core")
 astrbot_agent = types.ModuleType("astrbot.core.agent")
 astrbot_agent_run_context = types.ModuleType("astrbot.core.agent.run_context")
-astrbot_agent_run_context.ContextWrapper = type("ContextWrapper", (), {"__class_getitem__": classmethod(lambda cls, item: cls)})
+astrbot_agent_run_context.ContextWrapper = type(
+    "ContextWrapper", (), {"__class_getitem__": classmethod(lambda cls, item: cls)}
+)
 astrbot_agent_tool = types.ModuleType("astrbot.core.agent.tool")
 astrbot_agent_tool.ToolExecResult = type("ToolExecResult", (), {})
 astrbot_astr_agent_context = types.ModuleType("astrbot.core.astr_agent_context")
@@ -43,13 +44,23 @@ astrbot_computer_client.detach_sandbox_provider = None
 astrbot_computer_client.register_sandbox_provider = lambda *a, **k: None
 astrbot_computer_client.get_booter = None
 astrbot_olayer = types.ModuleType("astrbot.core.computer.olayer")
-for component in ("BrowserComponent", "FileSystemComponent", "GUIComponent", "PythonComponent", "ShellComponent"):
+for component in (
+    "BrowserComponent",
+    "FileSystemComponent",
+    "GUIComponent",
+    "PythonComponent",
+    "ShellComponent",
+):
     setattr(astrbot_olayer, component, type(component, (), {}))
 astrbot_booters = types.ModuleType("astrbot.core.computer.booters")
 astrbot_booters_base = types.ModuleType("astrbot.core.computer.booters.base")
 astrbot_booters_base.ComputerBooter = type("ComputerBooter", (), {})
 astrbot_sandbox_timeouts = types.ModuleType("astrbot.core.computer.sandbox_timeouts")
-astrbot_sandbox_timeouts.resolve_sandbox_timeout = lambda config, key, aliases=(), default=0: config.get(key, config.get(aliases[0], default) if aliases else default)
+astrbot_sandbox_timeouts.resolve_sandbox_timeout = (
+    lambda config, key, aliases=(), default=0: config.get(
+        key, config.get(aliases[0], default) if aliases else default
+    )
+)
 astrbot_message_result = types.ModuleType("astrbot.core.message.message_event_result")
 astrbot_message_result.MessageChain = type("MessageChain", (), {})
 astrbot_tools_util = types.ModuleType("astrbot.core.tools.computer_tools.util")
@@ -410,6 +421,52 @@ async def test_cua_provider_resume_repairs_legacy_display_name_persistent_name(
 
 
 @pytest.mark.asyncio
+async def test_cua_provider_does_not_trust_stale_local_state(monkeypatch):
+    class FakeSandboxState:
+        @staticmethod
+        def load(name):
+            if name == "cua-stale":
+                return {"name": name, "status": "running"}
+            return None
+
+    class FakeSandboxApi:
+        @staticmethod
+        async def connect(name, **kwargs):
+            raise RuntimeError(f"no local sandbox named {name}")
+
+        @staticmethod
+        async def resume(name, **kwargs):
+            raise RuntimeError(f"no local sandbox named {name}")
+
+    install_fake_import(
+        monkeypatch,
+        {
+            "cua": SimpleNamespace(Sandbox=FakeSandboxApi),
+            "cua_sandbox": SimpleNamespace(sandbox_state=FakeSandboxState),
+        },
+    )
+
+    provider = provider_module.CuaSandboxProvider()
+    exists = await provider.check_persistent_sandbox_exists(
+        {"sandbox_id": "cua-stale", "connect_info": {"local": True}}
+    )
+
+    assert exists is False
+
+
+@pytest.mark.asyncio
+async def test_cua_booter_available_probes_runtime(monkeypatch):
+    class StaleShell:
+        async def exec(self, command):
+            raise RuntimeError("connection refused")
+
+    booter = CuaBooter(local=True, persistent=True, persistent_name="cua-stale")
+    booter._runtime = SimpleNamespace(shell=StaleShell())
+
+    assert await booter.available() is False
+
+
+@pytest.mark.asyncio
 async def test_cua_booter_destroy_disconnects_before_delete(monkeypatch):
     calls = []
 
@@ -729,7 +786,7 @@ async def test_cua_provider_checks_resume_before_reporting_missing_persistent_sa
 
 
 @pytest.mark.asyncio
-async def test_cua_provider_preserves_local_state_even_when_connect_is_not_ready(
+async def test_cua_provider_verifies_local_state_readiness(
     monkeypatch,
 ):
     class FakeSandboxState:
@@ -740,7 +797,7 @@ async def test_cua_provider_preserves_local_state_even_when_connect_is_not_ready
     class FakeSandboxApi:
         @staticmethod
         async def connect(name, **kwargs):
-            raise AssertionError("state existence should avoid readiness checks")
+            raise RuntimeError(f"no local sandbox named {name}")
 
     fake_cua_module = SimpleNamespace(Sandbox=FakeSandboxApi)
     fake_state_module = SimpleNamespace(sandbox_state=FakeSandboxState)
@@ -756,7 +813,7 @@ async def test_cua_provider_preserves_local_state_even_when_connect_is_not_ready
         {"connect_info": {"persistent_name": "cua-persistent-1", "local": True}}
     )
 
-    assert exists is True
+    assert exists is False
 
 
 @pytest.mark.asyncio
