@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import inspect
 import shlex
@@ -20,6 +21,7 @@ from .cua_defaults import CUA_CONFIG_KEYS, CUA_DEFAULT_CONFIG
 
 _POSIX_OS_TYPES = {"linux", "darwin", "macos"}
 _MAX_SEARCH_LINE_COLUMNS = 1000
+_CUA_HEALTH_CHECK_TIMEOUT_SECONDS = 5.0
 
 _CUA_BACKGROUND_LAUNCHER = """
 import subprocess, sys, time
@@ -1031,4 +1033,34 @@ class CuaBooter(ComputerBooter):
         Path(local_path).write_bytes(base64.b64decode(result.get("stdout", "")))
 
     async def available(self) -> bool:
-        return self._runtime is not None
+        if self._runtime is None:
+            return False
+        return await self._is_runtime_healthy()
+
+    def _get_shell_exec(self) -> Any | None:
+        shell = getattr(self._runtime, "shell", None)
+        shell_exec = getattr(shell, "exec", None)
+        if not callable(shell_exec):
+            logger.warning(
+                "[Computer] CUA sandbox health check failed: shell is missing"
+            )
+            return None
+        return shell_exec
+
+    async def _is_runtime_healthy(self) -> bool:
+        shell_exec = self._get_shell_exec()
+        if shell_exec is None:
+            return False
+        try:
+            result = await asyncio.wait_for(
+                shell_exec("echo ok"), timeout=_CUA_HEALTH_CHECK_TIMEOUT_SECONDS
+            )
+        except asyncio.CancelledError:
+            raise
+        except asyncio.TimeoutError:
+            logger.warning("[Computer] CUA sandbox health check timed out")
+            return False
+        except Exception as exc:
+            logger.warning("[Computer] CUA sandbox health check failed: %s", exc)
+            return False
+        return not _has_explicit_command_failure(result)
