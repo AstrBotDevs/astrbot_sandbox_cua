@@ -1035,12 +1035,21 @@ class CuaBooter(ComputerBooter):
     async def available(self) -> bool:
         if self._runtime is None:
             return False
+        return await self._is_runtime_healthy()
+
+    def _get_shell_exec(self) -> Any | None:
         shell = getattr(self._runtime, "shell", None)
         shell_exec = getattr(shell, "exec", None)
         if not callable(shell_exec):
             logger.warning(
                 "[Computer] CUA sandbox health check failed: shell is missing"
             )
+            return None
+        return shell_exec
+
+    async def _is_runtime_healthy(self) -> bool:
+        shell_exec = self._get_shell_exec()
+        if shell_exec is None:
             return False
         try:
             result = await asyncio.wait_for(
@@ -1048,7 +1057,7 @@ class CuaBooter(ComputerBooter):
             )
         except asyncio.CancelledError:
             raise
-        except TimeoutError:
+        except asyncio.TimeoutError:
             logger.warning("[Computer] CUA sandbox health check timed out")
             return False
         except Exception as exc:
