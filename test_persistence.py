@@ -39,11 +39,16 @@ astrbot_agent_tool.ToolExecResult = type("ToolExecResult", (), {})
 astrbot_astr_agent_context = types.ModuleType("astrbot.core.astr_agent_context")
 astrbot_astr_agent_context.AstrAgentContext = type("AstrAgentContext", (), {})
 astrbot_computer = types.ModuleType("astrbot.core.computer")
+astrbot_sandbox_tool_binding = types.ModuleType(
+    "astrbot.core.computer.sandbox_tool_binding"
+)
+astrbot_sandbox_tool_binding.sandbox_provider_tool = lambda *a, **k: lambda cls: cls
 astrbot_computer_client = types.ModuleType("astrbot.core.computer.computer_client")
 astrbot_computer_client.cleanup_sandbox_provider = None
 astrbot_computer_client.detach_sandbox_provider = None
 astrbot_computer_client.register_sandbox_provider = lambda *a, **k: None
 astrbot_computer_client.get_booter = None
+astrbot_computer_client.sync_skills_to_active_sandboxes = lambda *a, **k: None
 astrbot_olayer = types.ModuleType("astrbot.core.computer.olayer")
 for component in (
     "BrowserComponent",
@@ -93,6 +98,7 @@ for name, module in {
     "astrbot.core.agent.tool": astrbot_agent_tool,
     "astrbot.core.astr_agent_context": astrbot_astr_agent_context,
     "astrbot.core.computer": astrbot_computer,
+    "astrbot.core.computer.sandbox_tool_binding": astrbot_sandbox_tool_binding,
     "astrbot.core.computer.computer_client": astrbot_computer_client,
     "astrbot.core.computer.olayer": astrbot_olayer,
     "astrbot.core.computer.booters": astrbot_booters,

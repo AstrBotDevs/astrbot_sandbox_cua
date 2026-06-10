@@ -9,6 +9,7 @@ from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.tool import ToolExecResult
 from astrbot.core.astr_agent_context import AstrAgentContext
 from astrbot.core.computer.computer_client import get_booter
+from astrbot.core.computer.sandbox_tool_binding import sandbox_provider_tool
 from astrbot.core.tools.computer_tools.util import check_admin_permission
 
 _CUA_TOOL_CONFIG = {
@@ -39,6 +40,7 @@ async def _get_gui_component(context: ContextWrapper[AstrAgentContext]) -> Any:
     return gui
 
 
+@sandbox_provider_tool("cua", config=_CUA_TOOL_CONFIG)
 @dataclass
 class CuaMouseClickTool(FunctionTool):
     name: str = "astrbot_cua_mouse_click"
@@ -75,6 +77,7 @@ class CuaMouseClickTool(FunctionTool):
             return f"Error clicking CUA desktop: {_exception_detail(e)}"
 
 
+@sandbox_provider_tool("cua", config=_CUA_TOOL_CONFIG)
 @dataclass
 class CuaKeyboardTypeTool(FunctionTool):
     name: str = "astrbot_cua_keyboard_type"
