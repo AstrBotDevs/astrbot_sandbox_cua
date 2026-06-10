@@ -81,7 +81,6 @@ TOOLS_PACKAGE = types.ModuleType("astrbot_sandbox_cua.tools")
 TOOLS_PACKAGE.__path__ = [str(Path(__file__).resolve().parent / "tools")]
 TOOLS_PACKAGE.CuaKeyboardTypeTool = type("CuaKeyboardTypeTool", (), {})
 TOOLS_PACKAGE.CuaMouseClickTool = type("CuaMouseClickTool", (), {})
-TOOLS_PACKAGE.CuaScreenshotTool = type("CuaScreenshotTool", (), {})
 
 for name, module in {
     "astrbot": astrbot,
