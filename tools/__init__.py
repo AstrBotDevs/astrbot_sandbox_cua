@@ -1,3 +1,3 @@
-from .cua import CuaKeyboardTypeTool, CuaMouseClickTool, CuaScreenshotTool
+from .cua import CuaKeyboardTypeTool, CuaMouseClickTool
 
-__all__ = ["CuaKeyboardTypeTool", "CuaMouseClickTool", "CuaScreenshotTool"]
+__all__ = ["CuaKeyboardTypeTool", "CuaMouseClickTool"]

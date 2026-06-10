@@ -10,7 +10,7 @@ from astrbot.core.computer.computer_client import (
 )
 
 from .provider import CuaSandboxProvider
-from .tools import CuaKeyboardTypeTool, CuaMouseClickTool, CuaScreenshotTool
+from .tools import CuaKeyboardTypeTool, CuaMouseClickTool
 
 
 @register(
@@ -27,7 +27,6 @@ class CuaSandboxRuntimePlugin(Star):
             self.provider,
             replace=True,
             tools=[
-                CuaScreenshotTool(),
                 CuaMouseClickTool(),
                 CuaKeyboardTypeTool(),
             ],
