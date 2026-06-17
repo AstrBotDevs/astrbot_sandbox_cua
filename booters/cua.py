@@ -8,6 +8,8 @@ from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from astrbot.api import logger
 from astrbot.core.computer.booters.base import ComputerBooter
 from astrbot.core.computer.olayer import (
@@ -22,6 +24,8 @@ from .cua_defaults import CUA_CONFIG_KEYS, CUA_DEFAULT_CONFIG
 _POSIX_OS_TYPES = {"linux", "darwin", "macos"}
 _MAX_SEARCH_LINE_COLUMNS = 1000
 _CUA_HEALTH_CHECK_TIMEOUT_SECONDS = 5.0
+_CUA_HEALTH_CHECK_RETRIES = 3
+_CUA_HEALTH_CHECK_RETRY_BACKOFF_SECONDS = 0.5
 
 _CUA_BACKGROUND_LAUNCHER = """
 import subprocess, sys, time
@@ -1048,19 +1052,61 @@ class CuaBooter(ComputerBooter):
         return shell_exec
 
     async def _is_runtime_healthy(self) -> bool:
+        """Check whether the CUA sandbox runtime is reachable.
+
+        Retries a few times on transient httpx/network errors because the
+        underlying CUA HTTP transport can occasionally drop a connection
+        (e.g. ``RemoteProtocolError: Server disconnected without sending a
+        response``) while the sandbox container itself is still healthy.
+        The probe command (``echo ok``) is idempotent, so retrying is safe.
+
+        Returns:
+            True if the sandbox responds successfully, False otherwise.
+        """
         shell_exec = self._get_shell_exec()
         if shell_exec is None:
             return False
-        try:
-            result = await asyncio.wait_for(
-                shell_exec("echo ok"), timeout=_CUA_HEALTH_CHECK_TIMEOUT_SECONDS
-            )
-        except asyncio.CancelledError:
-            raise
-        except asyncio.TimeoutError:
-            logger.warning("[Computer] CUA sandbox health check timed out")
-            return False
-        except Exception as exc:
-            logger.warning("[Computer] CUA sandbox health check failed: %s", exc)
-            return False
-        return not _has_explicit_command_failure(result)
+        for attempt in range(_CUA_HEALTH_CHECK_RETRIES):
+            try:
+                result = await asyncio.wait_for(
+                    shell_exec("echo ok"), timeout=_CUA_HEALTH_CHECK_TIMEOUT_SECONDS
+                )
+                return not _has_explicit_command_failure(result)
+            except asyncio.CancelledError:
+                raise
+            except asyncio.TimeoutError:
+                logger.warning("[Computer] CUA sandbox health check timed out")
+                return False
+            except Exception as exc:
+                # Only retry on transient httpx transport errors. Other
+                # exceptions (auth failures, command errors, missing shell)
+                # should fail fast.
+                if isinstance(
+                    exc,
+                    (
+                        httpx.RemoteProtocolError,
+                        httpx.ReadError,
+                        httpx.ConnectError,
+                        httpx.ConnectTimeout,
+                        httpx.ReadTimeout,
+                    ),
+                ):
+                    if attempt < _CUA_HEALTH_CHECK_RETRIES - 1:
+                        backoff = _CUA_HEALTH_CHECK_RETRY_BACKOFF_SECONDS * (
+                            2 ** attempt
+                        )
+                        logger.debug(
+                            "[Computer] CUA sandbox health check transient failure "
+                            "(attempt %d/%d), retrying in %.1fs: %s",
+                            attempt + 1,
+                            _CUA_HEALTH_CHECK_RETRIES,
+                            backoff,
+                            exc,
+                        )
+                        await asyncio.sleep(backoff)
+                        continue
+                logger.warning(
+                    "[Computer] CUA sandbox health check failed: %s", exc
+                )
+                return False
+        return False
