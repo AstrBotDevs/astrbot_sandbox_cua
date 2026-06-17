@@ -26,6 +26,7 @@ _MAX_SEARCH_LINE_COLUMNS = 1000
 _CUA_HEALTH_CHECK_TIMEOUT_SECONDS = 5.0
 _CUA_HEALTH_CHECK_RETRIES = 3
 _CUA_HEALTH_CHECK_RETRY_BACKOFF_SECONDS = 0.5
+_CUA_RETRYABLE_HEALTH_CHECK_ERRORS = (asyncio.TimeoutError, httpx.RequestError)
 
 _CUA_BACKGROUND_LAUNCHER = """
 import subprocess, sys, time
@@ -1074,39 +1075,28 @@ class CuaBooter(ComputerBooter):
                 return not _has_explicit_command_failure(result)
             except asyncio.CancelledError:
                 raise
-            except asyncio.TimeoutError:
-                logger.warning("[Computer] CUA sandbox health check timed out")
-                return False
-            except Exception as exc:
-                # Only retry on transient httpx transport errors. Other
-                # exceptions (auth failures, command errors, missing shell)
-                # should fail fast.
-                if isinstance(
-                    exc,
-                    (
-                        httpx.RemoteProtocolError,
-                        httpx.ReadError,
-                        httpx.ConnectError,
-                        httpx.ConnectTimeout,
-                        httpx.ReadTimeout,
-                    ),
-                ):
-                    if attempt < _CUA_HEALTH_CHECK_RETRIES - 1:
-                        backoff = _CUA_HEALTH_CHECK_RETRY_BACKOFF_SECONDS * (
-                            2 ** attempt
-                        )
-                        logger.debug(
-                            "[Computer] CUA sandbox health check transient failure "
-                            "(attempt %d/%d), retrying in %.1fs: %s",
-                            attempt + 1,
-                            _CUA_HEALTH_CHECK_RETRIES,
-                            backoff,
-                            exc,
-                        )
-                        await asyncio.sleep(backoff)
-                        continue
+            except _CUA_RETRYABLE_HEALTH_CHECK_ERRORS as exc:
+                if attempt < _CUA_HEALTH_CHECK_RETRIES - 1:
+                    backoff = _CUA_HEALTH_CHECK_RETRY_BACKOFF_SECONDS * (2**attempt)
+                    logger.debug(
+                        "[Computer] CUA sandbox health check transient failure "
+                        "(attempt %d/%d), retrying in %.1fs: %s",
+                        attempt + 1,
+                        _CUA_HEALTH_CHECK_RETRIES,
+                        backoff,
+                        exc,
+                    )
+                    await asyncio.sleep(backoff)
+                    continue
                 logger.warning(
-                    "[Computer] CUA sandbox health check failed: %s", exc
+                    "[Computer] CUA sandbox health check failed after retries: %s",
+                    exc,
                 )
                 return False
-        return False
+            except Exception as exc:
+                logger.warning(
+                    "[Computer] CUA sandbox health check failed with non-retryable "
+                    "error: %s",
+                    exc,
+                )
+                return False
