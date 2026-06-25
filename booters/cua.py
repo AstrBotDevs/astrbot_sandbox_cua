@@ -52,6 +52,56 @@ async def _maybe_await(value: Any) -> Any:
     return value
 
 
+async def _set_local_docker_restart_policy(
+    container_name: str,
+    policy: str = "unless-stopped",
+) -> None:
+    """Best-effort update for a local CUA Docker container restart policy.
+
+    Args:
+        container_name: Name of the local Docker container managed by CUA.
+        policy: Docker restart policy to apply.
+    """
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "docker",
+            "update",
+            "--restart",
+            policy,
+            container_name,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+    except FileNotFoundError:
+        logger.warning(
+            "[Computer] Docker CLI not found; cannot set CUA restart policy for %s",
+            container_name,
+        )
+        return
+    except Exception as exc:
+        logger.warning(
+            "[Computer] Failed to set CUA restart policy for %s: %s",
+            container_name,
+            exc,
+        )
+        return
+
+    if process.returncode != 0:
+        detail = (stderr or stdout).decode(errors="replace").strip()
+        logger.warning(
+            "[Computer] Failed to set CUA restart policy for %s: %s",
+            container_name,
+            detail or f"docker update exited with {process.returncode}",
+        )
+        return
+    logger.info(
+        "[Computer] Set CUA Docker restart policy for %s to %s",
+        container_name,
+        policy,
+    )
+
+
 def _is_missing_persistent_sandbox_error(exc: Exception) -> bool:
     detail = str(exc).lower()
     return (
@@ -826,6 +876,10 @@ class CuaBooter(ComputerBooter):
         sandbox_cm = None
         if self.persistent:
             sandbox = await self._boot_persistent(Sandbox, image_obj)
+            if self.local:
+                await _set_local_docker_restart_policy(
+                    str(self.persistent_name or "").strip()
+                )
         else:
             ephemeral_kwargs = self._build_ephemeral_kwargs(Sandbox.ephemeral)
             sandbox_cm = Sandbox.ephemeral(image_obj, **ephemeral_kwargs)

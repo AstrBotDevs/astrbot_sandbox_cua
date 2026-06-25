@@ -11,6 +11,9 @@ import types
 
 
 class _DummyLogger:
+    def debug(self, *args, **kwargs):
+        pass
+
     def warning(self, *args, **kwargs):
         pass
 
@@ -142,6 +145,9 @@ async def test_cua_booter_uses_persistent_create_and_disconnects_on_shutdown(
 ):
     calls = []
 
+    async def fake_restart_policy(name):
+        calls.append(("restart_policy", name))
+
     class FakeSandbox:
         def __init__(self, name: str):
             self.name = name
@@ -172,6 +178,9 @@ async def test_cua_booter_uses_persistent_create_and_disconnects_on_shutdown(
     fake_module = SimpleNamespace(Image=FakeImage, Sandbox=FakeSandboxApi)
 
     install_fake_import(monkeypatch, {"cua": fake_module})
+    monkeypatch.setattr(
+        cua_module, "_set_local_docker_restart_policy", fake_restart_policy
+    )
 
     booter = CuaBooter(
         image="linux",
@@ -192,7 +201,95 @@ async def test_cua_booter_uses_persistent_create_and_disconnects_on_shutdown(
             "local": True,
         },
     )
-    assert calls[1] == ("disconnect", "cua-persistent-1")
+    assert calls[1] == ("restart_policy", "cua-persistent-1")
+    assert calls[2] == ("disconnect", "cua-persistent-1")
+
+
+@pytest.mark.asyncio
+async def test_cua_booter_skips_restart_policy_for_remote_persistent_sandbox(
+    monkeypatch,
+):
+    restart_policy_calls = []
+
+    async def fake_restart_policy(name):
+        restart_policy_calls.append(name)
+
+    class FakeSandbox:
+        def __init__(self, name: str):
+            self.name = name
+            self.shell = SimpleNamespace(exec=lambda *args, **kwargs: None)
+            self.python = SimpleNamespace(exec=lambda *args, **kwargs: None)
+            self.filesystem = SimpleNamespace()
+            self.mouse = SimpleNamespace(click=lambda *args, **kwargs: None)
+            self.keyboard = SimpleNamespace(type=lambda *args, **kwargs: None)
+
+    class FakeImage:
+        @staticmethod
+        def linux():
+            return "linux-image"
+
+    class FakeSandboxApi:
+        @staticmethod
+        async def create(image, *, name=None, local=False, **kwargs):
+            return FakeSandbox(name)
+
+    fake_module = SimpleNamespace(Image=FakeImage, Sandbox=FakeSandboxApi)
+
+    install_fake_import(monkeypatch, {"cua": fake_module})
+    monkeypatch.setattr(
+        cua_module, "_set_local_docker_restart_policy", fake_restart_policy
+    )
+
+    booter = CuaBooter(
+        image="linux",
+        os_type="linux",
+        local=False,
+        persistent_name="cua-persistent-1",
+        persistent=True,
+    )
+
+    await booter.boot("ignored-session")
+
+    assert restart_policy_calls == []
+
+
+@pytest.mark.asyncio
+async def test_set_local_docker_restart_policy_warns_without_blocking(monkeypatch):
+    calls = []
+    warnings = []
+
+    class FakeProcess:
+        returncode = 1
+
+        async def communicate(self):
+            return b"", b"docker denied"
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        calls.append((args, kwargs))
+        return FakeProcess()
+
+    class FakeLogger:
+        def warning(self, *args, **kwargs):
+            warnings.append((args, kwargs))
+
+        def info(self, *args, **kwargs):
+            raise AssertionError("failed docker update must not log success")
+
+    monkeypatch.setattr(
+        cua_module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec
+    )
+    monkeypatch.setattr(cua_module, "logger", FakeLogger())
+
+    await cua_module._set_local_docker_restart_policy("cua-persistent-1")
+
+    assert calls[0][0][:5] == (
+        "docker",
+        "update",
+        "--restart",
+        "unless-stopped",
+        "cua-persistent-1",
+    )
+    assert "docker denied" in warnings[0][0][2]
 
 
 @pytest.mark.asyncio
@@ -246,6 +343,9 @@ async def test_cua_terminate_noops_when_provider_missing(monkeypatch):
 async def test_cua_booter_resumes_persistent_runtime_when_resume_enabled(monkeypatch):
     calls = []
 
+    async def fake_restart_policy(name):
+        calls.append(("restart_policy", name))
+
     class FakeSandbox:
         def __init__(self, name: str):
             self.name = name
@@ -282,6 +382,9 @@ async def test_cua_booter_resumes_persistent_runtime_when_resume_enabled(monkeyp
     fake_module = SimpleNamespace(Image=FakeImage, Sandbox=FakeSandboxApi)
 
     install_fake_import(monkeypatch, {"cua": fake_module})
+    monkeypatch.setattr(
+        cua_module, "_set_local_docker_restart_policy", fake_restart_policy
+    )
 
     booter = CuaBooter(
         image="linux",
@@ -294,7 +397,10 @@ async def test_cua_booter_resumes_persistent_runtime_when_resume_enabled(monkeyp
 
     await booter.boot("ignored-session")
 
-    assert calls == [("resume", "cua-persistent-1", {"local": True})]
+    assert calls == [
+        ("resume", "cua-persistent-1", {"local": True}),
+        ("restart_policy", "cua-persistent-1"),
+    ]
 
 
 @pytest.mark.asyncio
